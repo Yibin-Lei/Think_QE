@@ -1,0 +1,11 @@
+pip install transformers==4.48.2
+openai
+pandas
+datasets
+accelerate
+sklearn
+nltk
+pytrec_eval
+pyserini
+vllm
+setuptools==59.5.0
