@@ -1,0 +1,12 @@
+# Same as requirements_snellius.txt but with a vLLM/transformers new enough for Qwen3.
+transformers==4.51.3
+vllm==0.8.5.post1
+pyserini==0.22.1       # last pyserini that runs on Java 11 + Python 3.10
+faiss-cpu==1.8.0.post1 # pyserini.search imports faiss; GPU faiss isn't needed for BM25
+openai
+pandas
+datasets
+accelerate
+scikit-learn
+nltk
+spacy

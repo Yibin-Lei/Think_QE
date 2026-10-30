@@ -1,0 +1,25 @@
+#!/bin/bash
+# Builds the BRIGHT Lucene indexes (CPU only). Submit from the repo root:
+#   sbatch snellius/02_index_bright.job
+#SBATCH --job-name=bright_index
+#SBATCH --partition=rome
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=04:00:00
+#SBATCH --output=bright_index_%j.out
+
+set -euo pipefail
+source snellius/common.sh
+cd bright
+
+# Only the 7 datasets used in the paper's README (the repo's index_corpus.sh
+# does all 12; swap in that list if you want the rest too).
+for dataset in biology earth_science economics psychology robotics stackoverflow sustainable_living; do
+  python -m pyserini.index.lucene \
+    --collection JsonCollection \
+    --input data/pyserini_corpus/$dataset \
+    --index data/pyserini_indexes/$dataset \
+    --generator DefaultLuceneDocumentGenerator \
+    --storePositions --storeDocvectors --storeRaw \
+    --threads $SLURM_CPUS_PER_TASK
+done

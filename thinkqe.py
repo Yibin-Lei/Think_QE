@@ -331,16 +331,8 @@ def define_search_args(parser):
     parser.add_argument('--stopwords', type=str, help='Path to file with customstopwords.')
 
 
-def progressive_query_rewrite(
-        openai_api, query, top_passages,
-        max_demo_len=None, index=None,
-        expansion_method="", 
-        reqeat_weight=None,
-        accumulated_query_expansions=None,
-        accumulate=False,
-        topic_id=None,
-        *arg, **kwargs):
-
+def build_expansion_messages(query, top_passages, max_demo_len=None, expansion_method=""):
+    """Prompt construction, unchanged from the original progressive_query_rewrite."""
     if max_demo_len:
         top_passages = [truncate_text(psg, max_demo_len) for psg in top_passages]
 
@@ -353,8 +345,12 @@ def progressive_query_rewrite(
 
     ]
     print("Input message:" + user_prompt)
-    gen_fn = openai_api.completion_chat
-    response_list = gen_fn(messages, *arg, **kwargs)
+    return messages
+
+
+def finalize_query_rewrite(query, response_list, reqeat_weight=None,
+                           accumulated_query_expansions=None, accumulate=False, topic_id=None):
+    """Turn generated responses into the new query, unchanged from the original progressive_query_rewrite."""
     print("*" * 100 + "\nR1 trace:\n")    
     print(response_list)
     print("\n" + "*" * 100 + "\n")
@@ -375,6 +371,24 @@ def progressive_query_rewrite(
 
     user_query = "\n".join(new_list).lower()
 
+    return user_query, accumulated_query_expansions
+
+
+def progressive_query_rewrite(
+        openai_api, query, top_passages,
+        max_demo_len=None, index=None,
+        expansion_method="", 
+        reqeat_weight=None,
+        accumulated_query_expansions=None,
+        accumulate=False,
+        topic_id=None,
+        *arg, **kwargs):
+    # Original one-query-at-a-time path (same steps, now split into two helpers)
+    messages = build_expansion_messages(query, top_passages, max_demo_len, expansion_method)
+    gen_fn = openai_api.completion_chat
+    response_list = gen_fn(messages, *arg, **kwargs)
+    user_query, accumulated_query_expansions = finalize_query_rewrite(
+        query, response_list, reqeat_weight, accumulated_query_expansions, accumulate, topic_id)
     return user_query, response_list, accumulated_query_expansions
 
 
@@ -434,6 +448,8 @@ def main():
     parser.add_argument('--use_passage_filter', type=lambda x: x.lower() == 'true', default=False, help="Use filter for dropping previous seen passages")
     parser.add_argument('--no_thinking', type=lambda x: x.lower() == 'true', default=False, help="No thinking mode for the R1-distill-qwen model")
     parser.add_argument('--num_interaction', type=int, default=3, help="Number of interaction rounds with the corpus")
+    parser.add_argument('--batch_generation', type=lambda x: x.lower() == 'true', default=False, help="Generate all queries of a round in one vLLM call (added for the reproduction; default off = original behaviour)")
+    parser.add_argument('--seed', type=int, default=0, help="vLLM engine seed (added for the reproduction; 0 = vLLM 0.7.x default)")
     args = parser.parse_args()
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and not args.overwrite_output_dir:
@@ -445,7 +461,7 @@ def main():
         os.makedirs(args.output_dir)  # Create output directory if needed
 
     # generation model
-    openai_api = VLLMCompletion(model_name=args.generation_model, control_thinking=args.no_thinking)
+    openai_api = VLLMCompletion(model_name=args.generation_model, control_thinking=args.no_thinking, seed=args.seed)
 
     # query data
     query_iterator = get_query_iterator(args.topics, TopicsFormat(args.topics_format))
@@ -493,6 +509,7 @@ def main():
             # # data generation
             aug_qid_query_list = []
             qid2responses = dict()
+            pending = []  # (topic_id, query, messages), used when --batch_generation is on
 
             for index, (topic_id, query) in enumerate(tqdm(org_qid_query_list, total=len(org_qid_query_list))):
                 # Get top passages but filter out previously seen ones
@@ -526,6 +543,12 @@ def main():
                     # If filtering is disabled, just use the top passages directly
                     top_passages = all_passages[:args.keep_passage_num]
                 
+                if args.batch_generation:
+                    # Batched mode: only build the prompt now; generate for all queries after the loop
+                    pending.append((topic_id, query, build_expansion_messages(
+                        query, top_passages, args.max_demo_len, args.expansion_method)))
+                    continue
+
                 query_aug, response_list, accumulated_query_expansions = progressive_query_rewrite(
                     openai_api, query, top_passages, n=args.gen_num,
                     max_demo_len=args.max_demo_len, index=args.index,
@@ -540,6 +563,19 @@ def main():
                 print(topic_id, "|||", query_aug)
 
                 qid2responses[topic_id] = response_list
+
+            if args.batch_generation:
+                # One vLLM call for every query in this round
+                all_responses = openai_api.completion_chat_batch(
+                    [m for _, _, m in pending], n=args.gen_num,
+                    temperature=args.temperature, max_tokens=args.max_tokens)
+                for (topic_id, query, _), response_list in zip(pending, all_responses):
+                    query_aug, accumulated_query_expansions = finalize_query_rewrite(
+                        query, response_list, args.reqeat_weight,
+                        accumulated_query_expansions, args.accumulate, topic_id)
+                    aug_qid_query_list.append((topic_id, query_aug))
+                    print(topic_id, "|||", query_aug)
+                    qid2responses[topic_id] = response_list
 
             save_json(qid2responses, output_path_bm25 + ".responses.json")
             iter_org_qid_query_list = aug_qid_query_list

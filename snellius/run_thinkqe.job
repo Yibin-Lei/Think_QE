@@ -1,0 +1,75 @@
+#!/bin/bash
+# One ThinkQE run (README default hyperparameters). Submit from the repo root:
+#   sbatch snellius/run_thinkqe.job dl19
+#   sbatch snellius/run_thinkqe.job dl20
+#   sbatch snellius/run_thinkqe.job biology      # or earth_science, economics,
+#                                                # psychology, robotics,
+#                                                # stackoverflow, sustainable_living
+# Different model:  MODEL=Qwen/Qwen3-8B sbatch snellius/run_thinkqe.job dl19
+# (easier: bash snellius/submit_runs.sh <model> all)
+#
+# 1x H100 (94 GB) fits the 14B model with the 32k context the code requests.
+# On A100s (40 GB) use --partition=gpu_a100 --gpus=2 --cpus-per-task=36 instead;
+# the code automatically tensor-parallelises over all visible GPUs.
+#SBATCH --job-name=thinkqe
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=08:00:00
+#SBATCH --output=thinkqe_%x_%j.out
+
+set -euo pipefail
+DATASET=${1:?usage: sbatch snellius/run_thinkqe.job <dl19|dl20|bright_dataset>}
+source snellius/common.sh
+
+# Everything was pre-downloaded by 01_download.sh
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+
+NUM_INTERACTION=3
+KEEP_PASSAGE_NUM=5
+GEN_NUM=2
+USE_PASSAGE_FILTER=true
+ACCUMULATE=true
+
+case $DATASET in
+  dl19) DATA_ARGS=(--index msmarco-v1-passage --topics dl19-passage --max_demo_len 128) ;;
+  dl20) DATA_ARGS=(--index msmarco-v1-passage --topics dl20 --qrels dl20-passage --max_demo_len 128) ;;
+  *)    # BRIGHT. NB: the code detects BRIGHT by the string "bright" in --topics,
+        # so keep the data under ./bright/ as the README does.
+        DATA_ARGS=(--index ./bright/data/pyserini_indexes/$DATASET
+                   --topics ./bright/data/pyserini_queries/$DATASET.tsv
+                   --qrels ./bright/data/pyserini_qrels/$DATASET.tsv
+                   --max_demo_len 512) ;;
+esac
+
+# Reproduction options (set via submit_runs.sh): batched generation and vLLM seed
+BATCH=${BATCH:-false}; SEED=${SEED:-0}
+TAG=""; [ "$BATCH" = "true" ] && TAG="batched_"
+[ "$BATCH" = "true" ] || [ "$SEED" != "0" ] && TAG="__${TAG}s${SEED}"
+OUT=$WORK/outputs/${DATASET}_$(basename "$MODEL")${TAG}
+echo "Dataset=$DATASET  Model=$MODEL  Batch=$BATCH  Seed=$SEED  Output=$OUT"
+nvidia-smi
+
+python thinkqe.py \
+    --expansion_method thinkqe \
+    --threads 16 --batch-size 128 \
+    "${DATA_ARGS[@]}" \
+    --answer_key contents \
+    --bm25 --disable_bm25_param \
+    --trec_python_path "$(which python)" \
+    --generation_model "$MODEL" \
+    --num_interaction ${NUM_INTERACTION} \
+    --keep_passage_num ${KEEP_PASSAGE_NUM} \
+    --gen_num ${GEN_NUM} \
+    --use_passage_filter ${USE_PASSAGE_FILTER} \
+    --output_dir "$OUT" \
+    --overwrite_output_dir \
+    --temperature 0.7 \
+    --write_top_passages \
+    --accumulate ${ACCUMULATE} \
+    --batch_generation ${BATCH} \
+    --seed ${SEED}
+
+echo "=== Final metrics (round ${NUM_INTERACTION}) ==="
+cat "$OUT/bm25-aug${NUM_INTERACTION}_result_retrieval.trec.metrics.json"

@@ -1,0 +1,14 @@
+# Fixed version of the repo's requirements.txt (the original has a stray
+# "pip install" on line 1, uses the dead "sklearn" alias, and leaves vllm/pyserini
+# unpinned, which no longer works with transformers==4.48.2 / Java 11).
+transformers==4.48.2
+vllm==0.7.3            # last vllm line compatible with transformers 4.48 (pulls torch 2.5.1)
+pyserini==0.22.1       # last pyserini that runs on Java 11 + Python 3.10
+faiss-cpu==1.8.0.post1 # pyserini.search imports faiss; GPU faiss isn't needed for BM25
+openai
+pandas
+datasets
+accelerate
+scikit-learn
+nltk
+spacy
